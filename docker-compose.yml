@@ -1,78 +1,133 @@
-version: '3.1'
-services:
-  postgres-server: # The Postgres Database Service
-    container_name: postgres-server
-    image: postgres:alpine
-    restart: unless-stopped
-    environment: # Username, password and database name variables
-      POSTGRES_USER: zabbix
-      POSTGRES_PASSWORD: zabbix
-      POSTGRES_DB: zabbix
-      PG_DATA: /var/lib/postgresql/data/pgdata #data storage
-      
-  zabbix-server: # The main Zabbix Server Software Service
-    container_name: zabbix-server
-    image: zabbix/zabbix-server-pgsql:ubuntu-latest
-    restart: unless-stopped
-    environment: # The Postgres database value variable
-      POSTGRES_USER: zabbix
-      POSTGRES_PASSWORD: zabbix
-      POSTGRES_DB: zabbix
-      ZBX_HISTORYSTORAGETYPES: log,text # Zabbix configuration variables
-      ZBX_DEBUGLEVEL: 1
-      ZBX_HOUSEKEEPINGFREQUENCY: 1
-      ZBX_MAXHOUSEKEEPERDELETE: 5000
-    depends_on:
-      - postgres-server
-    volumes:  # Volumes for scripts and related files you can add
-      - alertscripts:/usr/lib/zabbix/alertscripts
-  
-  zabbix-web: # The main Zabbix web UI or interface 
-    container_name: zabbix-web
-    image: zabbix/zabbix-web-nginx-pgsql:ubuntu-latest
-    restart: unless-stopped
-    environment:  # Postgre database variables
-      POSTGRES_USER: zabbix
-      POSTGRES_PASSWORD: zabbix
-      POSTGRES_DB: zabbix
-      ZBX_SERVER_HOST: zabbix-server  # Zabbix related and Php variables
-      ZBX_POSTMAXSIZE: 64M
-      PHP_TZ: "America/Sao_Paulo"  
-      ZBX_MAXEXECUTIONTIME: 500
-    depends_on:
-      - postgres-server
-      - zabbix-server
-    ports: # Port where Zabbix UI is available
-      - 8090:80
-      
-  zabbix-agent: # Zabbix agent service that tracks usage and send to zabbix server
-    container_name: zabbix-agent
-    image: zabbix/zabbix-agent:ubuntu-latest
-    privileged: true #access mode for allowing resource access
-    restart: unless-stopped
-    environment:
-      - ZBX_SERVER_HOST=zabbix-server # the IP/Dns of Zabbix server
-      
-  adminer:
-    container_name: adminer-dg
-    image: dockette/adminer:dg
-    restart: unless-stopped
-    ports:
-      - 8080:80
-    environment:
-      - ADMINER_DESIGN=nette
-      
-  grafana-xxl:  #optional more functional and creative UI 
-    container_name: grafana-xxl
-    image: monitoringartist/grafana-xxl:latest
-    restart: unless-stopped
-    ports:
-     - 3000:3000
-     
-volumes:
-  alertscripts:
-    driver: local
+version: "3.2"
+
+networks:
+  zbx_net:
+    driver: bridge
     driver_opts:
-      type: none
-      o: bind
-      device: "${PWD}/zabbix/alertscripts"
+      com.docker.network.enable_ipv6: "false"
+    ipam:
+      driver: default
+      config:
+      - subnet: 172.16.238.0/24
+
+services:
+  mariadb:
+    container_name: mariadb-zabbix
+    image: mariadb:10.8
+    networks:
+      - zbx_net
+    restart: unless-stopped
+    ports:
+      - "3406:3306"
+    volumes:
+      - ./data/db:/var/lib/mysql
+    command:
+      - mysqld
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_bin
+      - --default-authentication-plugin=mysql_native_password
+    env_file:
+      - ./data/env_vars/db.env
+
+  zabbix-server:
+    container_name: zabbix-server
+    image: zabbix/zabbix-server-mysql:ubuntu-6.2-latest
+    networks:
+      - zbx_net
+    links:
+      - mariadb
+    restart: unless-stopped
+    ports:
+      - "10051:10051"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ./data/zabbix/alertscripts:/usr/lib/zabbix/alertscripts:ro
+      - ./data/zabbix/mibs:/var/lib/zabbix/mibs:ro
+      - ./data/zabbix/snmptraps:/var/lib/zabbix/snmptraps:rw
+    env_file:
+      - ./data/env_vars/db.env
+      - ./data/env_vars/srv.env
+    depends_on:
+      - mariadb
+    sysctls:
+      - net.ipv4.ip_local_port_range=1024 65000
+      - net.ipv4.conf.all.accept_redirects=0
+      - net.ipv4.conf.all.secure_redirects=0
+      - net.ipv4.conf.all.send_redirects=0
+
+  zabbix-frontend:
+    container_name: zabbix-frontend
+    image: zabbix/zabbix-web-apache-mysql:ubuntu-6.2-latest
+    networks:
+      - zbx_net
+    links:
+      - mariadb
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - ./data/env_vars/db.env
+      - ./data/env_vars/web.env
+    depends_on:
+      - mariadb
+      - zabbix-server
+    sysctls:
+      - net.core.somaxconn=65535
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:9.0.7-ubuntu
+    networks:
+      - zbx_net
+    links:
+      - mariadb
+      - zabbix-server
+    restart: unless-stopped
+    user: "472"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+    env_file:
+      - ./data/env_vars/grafana.env
+    depends_on:
+      - mariadb
+      - zabbix-server
+
+  zabbix-agent:
+    container_name: zabbix-agent
+    image: zabbix/zabbix-agent2:alpine-6.2-latest
+    networks:
+      - zbx_net
+    links:
+      - zabbix-server
+    restart: unless-stopped
+    privileged: true
+    pid: "host"
+    user: 0:0
+    ports:
+      - "10050:10050"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - ZBX_HOSTNAME=zabbix-server
+    depends_on:
+      - zabbix-server
+
+  zabbix-snmptraps:
+    container_name: zabbix-snmptraps
+    image: zabbix/zabbix-snmptraps:ubuntu-6.2-latest
+    networks:
+      - zbx_net
+    restart: unless-stopped
+    ports:
+      - "162:1162/udp"
+    volumes:
+      - ./data/zabbix/snmptraps:/var/lib/zabbix/snmptraps:rw
+    stop_grace_period: 5s
+    labels:
+      com.zabbix.description: "Zabbix snmptraps"
+      com.zabbix.component: "snmptraps"
