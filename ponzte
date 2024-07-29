@@ -13,4 +13,4 @@ STATUS=$4
 
 #Ex: ./ponzte public seu-ip 268501248 3
 
-snmpwalk -v2c -c $COMMUNITY $IP 1.3.6.1.4.1.3902.1012.3.28.2.1.4."$PON" | grep -v "No Such" | awk '{print $4}' | grep "$STATUS" | wc -l
+snmpwalk -Ln -v2c -c $COMMUNITY $IP 1.3.6.1.4.1.3902.1012.3.28.2.1.4."$PON" | grep -v "No Such" | awk '{print $4}' | grep "$STATUS" | wc -l
